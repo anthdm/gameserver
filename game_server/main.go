@@ -12,34 +12,49 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type PlayerState struct {
-	Position types.Position
-	Health   int
-	Velocity int
-}
-
 type PlayerSession struct {
 	sessionID int
 	clientID  int
 	username  string
 	inLobby   bool
 	conn      *websocket.Conn
+	ctx       *actor.Context
+	serverPID *actor.PID
 }
 
-func newPlayerSession(sid int, conn *websocket.Conn) actor.Producer {
+func newPlayerSession(serverPID *actor.PID, sid int, conn *websocket.Conn) actor.Producer {
 	return func() actor.Receiver {
 		return &PlayerSession{
 			conn:      conn,
 			sessionID: sid,
+			serverPID: serverPID,
 		}
 	}
 }
 
 func (s *PlayerSession) Receive(c *actor.Context) {
-	switch c.Message().(type) {
+	switch msg := c.Message().(type) {
 	case actor.Started:
-		s.readLoop()
-		// statePID = c.SpawnChild(newPlayerState, "playerState")
+		s.ctx = c
+		go s.readLoop()
+	case *types.PlayerState:
+		s.sendPlayerState(msg)
+	default:
+		fmt.Println("recv", msg)
+	}
+}
+
+func (s *PlayerSession) sendPlayerState(state *types.PlayerState) {
+	b, err := json.Marshal(state)
+	if err != nil {
+		panic(err)
+	}
+	msg := types.WSMessage{
+		Type: "state",
+		Data: b,
+	}
+	if err := s.conn.WriteJSON(msg); err != nil {
+		panic(err)
 	}
 }
 
@@ -68,27 +83,42 @@ func (s *PlayerSession) handleMessage(msg types.WSMessage) {
 		if err := json.Unmarshal(msg.Data, &ps); err != nil {
 			panic(err)
 		}
-		fmt.Println(ps)
+		ps.SessionID = s.sessionID
+		if s.ctx != nil {
+			s.ctx.Send(s.serverPID, &ps)
+		}
 	}
 }
 
 type GameServer struct {
 	ctx      *actor.Context
-	sessions map[*actor.PID]struct{}
+	sessions map[int]*actor.PID
 }
 
 func newGameServer() actor.Receiver {
 	return &GameServer{
-		sessions: make(map[*actor.PID]struct{}),
+		sessions: make(map[int]*actor.PID),
 	}
 }
 
 func (s *GameServer) Receive(c *actor.Context) {
 	switch msg := c.Message().(type) {
+	case *types.PlayerState:
+		s.bcast(c.Sender(), msg)
 	case actor.Started:
 		s.startHTTP()
 		s.ctx = c
 		_ = msg
+	default:
+		fmt.Println("recv", msg)
+	}
+}
+
+func (s *GameServer) bcast(from *actor.PID, state *types.PlayerState) {
+	for _, pid := range s.sessions {
+		if !pid.Equals(from) {
+			s.ctx.Send(pid, state)
+		}
 	}
 }
 
@@ -107,10 +137,10 @@ func (s *GameServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("ws upgrade err:", err)
 		return
 	}
-	fmt.Print("new client trying connect")
+	fmt.Println("new client trying connect")
 	sid := rand.Intn(math.MaxInt)
-	pid := s.ctx.SpawnChild(newPlayerSession(sid, conn), fmt.Sprintf("session_%d", sid))
-	s.sessions[pid] = struct{}{}
+	pid := s.ctx.SpawnChild(newPlayerSession(s.ctx.PID(), sid, conn), fmt.Sprintf("session_%d", sid))
+	s.sessions[sid] = pid
 }
 
 func main() {

@@ -16,6 +16,7 @@ type Position struct {
 }
 
 type PlayerState struct {
-	Health   int      `json:"health"`
-	Position Position `json:"position"`
+	Health    int      `json:"health"`
+	Position  Position `json:"position"`
+	SessionID int
 }
